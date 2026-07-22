@@ -243,7 +243,7 @@ fn draw_sensor_curve_mini(ui: &mut egui::Ui, points: &[SensorCurvePoint]) {
     painter.rect_stroke(
         rect,
         5.0,
-        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+        egui::Stroke::new(1.0_f32, ui.visuals().widgets.inactive.bg_stroke.color),
         egui::StrokeKind::Inside,
     );
 
@@ -269,7 +269,7 @@ fn draw_sensor_curve_mini(ui: &mut egui::Ui, points: &[SensorCurvePoint]) {
     if positions.len() >= 2 {
         painter.add(egui::Shape::line(
             positions.clone(),
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(94, 184, 255)),
+            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(94, 184, 255)),
         ));
     }
     for position in positions {
@@ -294,7 +294,7 @@ fn draw_sensor_curve_preview(
     painter.rect_stroke(
         rect,
         6.0,
-        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+        egui::Stroke::new(1.0_f32, ui.visuals().widgets.inactive.bg_stroke.color),
         egui::StrokeKind::Inside,
     );
 
@@ -318,12 +318,12 @@ fn draw_sensor_curve_preview(
         let x = egui::lerp(plot.left()..=plot.right(), fraction);
         painter.line_segment(
             [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
-            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_fill),
+            egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_fill),
         );
         let y = egui::lerp(plot.bottom()..=plot.top(), fraction);
         painter.line_segment(
             [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_fill),
+            egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_fill),
         );
     }
 
@@ -357,7 +357,7 @@ fn draw_sensor_curve_preview(
     if positions.len() >= 2 {
         painter.add(egui::Shape::line(
             positions.clone(),
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(94, 184, 255)),
+            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(94, 184, 255)),
         ));
     }
     for (point, position) in curve.iter().zip(positions.iter()) {
