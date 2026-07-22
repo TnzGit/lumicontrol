@@ -4,16 +4,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    # Routine upgrades are reviewed manually; security updates stay enabled.
+    open-pull-requests-limit: 0
 
   - package-ecosystem: npm
     directory: /apps/lumi-ui
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
