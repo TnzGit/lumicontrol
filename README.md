@@ -23,10 +23,11 @@
 </p>
 
 LumiControl automatically adapts compatible DDC/CI monitors to the light around
-you. An ESP32-C3 with a GY-302/BH1750 sensor provides live lux readings, while a
-low-resource Windows Agent applies your calibration curve with smooth,
-retargetable brightness transitions. An optional relay profile can also control
-a low-voltage desk or monitor light strip.
+you. It can use either live lux readings from an ESP32-C3 and GY-302/BH1750, or a
+hardware-free recommendation model based on local weather, solar elevation,
+sunrise, sunset, and seasonal daylight. A low-resource Windows Agent applies the
+result with smooth, retargetable brightness transitions. An optional relay
+profile can also control a low-voltage desk or monitor light strip.
 
 ## Download
 
@@ -42,16 +43,20 @@ Download the latest Windows x64 installer from
 
 - Windows 10 or Windows 11, x64
 - a monitor with DDC/CI enabled in its on-screen menu
-- an ESP32-C3 SuperMini with a GY-302/BH1750 ambient-light sensor
+- either an internet connection and location for **Weather & sun** mode, or an
+  ESP32-C3 SuperMini with a GY-302/BH1750 sensor for **USB sensor** mode
 - optional supported 5 V relay module for light-strip control
 
-After installation, connect the sensor over USB and open LumiControl. The Agent
-discovers supported hardware automatically; use **Calibration** to tune the
-lux-to-brightness curve for your room and monitors.
+After installation, open LumiControl and choose an automatic brightness source.
+**Weather & sun** works without LumiControl hardware and lets you add a personal
+offset to the recommendation. **USB sensor** discovers supported hardware
+automatically and provides a draggable lux-to-brightness calibration curve.
 
 ## Highlights
 
 - always-on, low-resource Windows Agent with an on-demand Tauri interface
+- hardware-free brightness recommendations from weather, solar elevation,
+  sunrise, sunset, seasonal daylight, and a personal offset
 - automatic USB discovery for sensor-only and sensor-plus-relay profiles
 - smooth DDC/CI brightness transitions that can retarget while moving
 - draggable lux-to-brightness calibration curve with three-step revert history
@@ -63,7 +68,7 @@ lux-to-brightness curve for your room and monitors.
 - light, dark, and system themes
 - local diagnostics with sensitive hardware identifiers redacted
 
-## Hardware
+## Optional Hardware
 
 Validated ESP32-C3 SuperMini wiring:
 
@@ -89,8 +94,10 @@ an appropriately isolated power path.
 
 The Agent and UI communicate through a Windows named pipe restricted to the
 current user. Settings, backups, logs, and diagnostics remain under
-`%LOCALAPPDATA%\LumiControl`. Weather requests are made only when enabled rules
-need weather data. No account is required.
+`%LOCALAPPDATA%\LumiControl`. Weather requests are made only when **Weather &
+sun** mode or enabled light rules need them. Requests include the configured
+coordinates but no LumiControl account or hardware identifier. If weather is
+unavailable, brightness control continues with the local sunlight model.
 
 ## Architecture
 
@@ -104,7 +111,9 @@ need weather data. No account is required.
 - `src`: legacy V1 implementation retained as a regression reference
 
 Architecture, protocol, firmware validation, performance measurements, and
-release-readiness notes are available under [`docs/v2`](docs/v2/).
+release-readiness notes are available under [`docs/v2`](docs/v2/). The
+hardware-free recommendation model is documented in
+[`docs/v2/environment-brightness.md`](docs/v2/environment-brightness.md).
 
 ## Development
 

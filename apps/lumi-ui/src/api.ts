@@ -8,7 +8,9 @@ declare global {
 }
 
 const isTauri = typeof window !== "undefined" && window.__TAURI_INTERNALS__ !== undefined;
-const demoOnboarding = !isTauri && new URLSearchParams(window.location.search).has("onboarding");
+const demoParameters = !isTauri ? new URLSearchParams(window.location.search) : new URLSearchParams();
+const demoOnboarding = demoParameters.has("onboarding");
+const demoEnvironment = demoParameters.has("environment");
 
 let demoSettings: SettingsDocument = {
   schema_version: 2,
@@ -19,6 +21,8 @@ let demoSettings: SettingsDocument = {
     locale: "system",
     theme: "system",
     control: {
+      brightness_source: demoEnvironment ? "environment" : "sensor",
+      environment_brightness_offset: demoEnvironment ? 4 : 0,
       sensor_curve: [
         { lux: 1, brightness: 12 },
         { lux: 15, brightness: 28 },
@@ -84,35 +88,38 @@ let demoSettings: SettingsDocument = {
 };
 
 let demoRevision = 18;
-const demoSnapshot = (): AgentSnapshot => ({
+const demoSnapshot = (): AgentSnapshot => {
+  const environmentMode = demoSettings.settings.control.brightness_source === "environment";
+  return ({
   api_version: 2,
   revision: demoRevision,
   generated_at_unix_ms: Date.now(),
   health: "healthy",
-  status_message: "Automatic control is active",
+  status_message: environmentMode ? "Automatic control is using weather and sunlight" : "Automatic control is active",
   configuration_warning: null,
   paused: demoSettings.settings.paused,
-  target_percent: 61,
+  brightness_source: demoSettings.settings.control.brightness_source,
+  target_percent: environmentMode ? 55 : 61,
   device: {
-    state: "connected",
-    product_id: "LC-SR1",
-    serial_number: "DEV-DEMO00000001",
-    hardware_version: "1.0",
-    firmware_version: "2.0.0",
-    bootloader_version: "1.0.0",
-    protocol_min: 2,
-    protocol_max: 2,
-    negotiated_protocol: 2,
-    port_name: "COM3",
-    capabilities: ["ambient_lux", "relay"],
+    state: environmentMode ? "disconnected" : "connected",
+    product_id: environmentMode ? null : "LC-SR1",
+    serial_number: environmentMode ? null : "DEV-DEMO00000001",
+    hardware_version: environmentMode ? null : "1.0",
+    firmware_version: environmentMode ? null : "2.0.0",
+    bootloader_version: environmentMode ? null : "1.0.0",
+    protocol_min: environmentMode ? null : 2,
+    protocol_max: environmentMode ? null : 2,
+    negotiated_protocol: environmentMode ? null : 2,
+    port_name: environmentMode ? null : "COM3",
+    capabilities: environmentMode ? [] : ["ambient_lux", "relay"],
     reconnect_count: 0,
     last_error: null,
   },
   sensor: {
-    raw_lux: 67.2,
-    filtered_lux: 64.8,
-    sample_age_ms: 740,
-    valid: true,
+    raw_lux: environmentMode ? null : 67.2,
+    filtered_lux: environmentMode ? null : 64.8,
+    sample_age_ms: environmentMode ? null : 740,
+    valid: !environmentMode,
     sequence_gaps: 0,
     malformed_frames: 0,
   },
@@ -123,7 +130,7 @@ const demoSnapshot = (): AgentSnapshot => ({
       display_path: "DISPLAY2",
       qualified: true,
       current_percent: 60,
-      target_percent: 61,
+      target_percent: environmentMode ? 55 : 61,
       transition_active: false,
       manual_override_remaining_ms: null,
       ddc_error_count: 0,
@@ -135,7 +142,7 @@ const demoSnapshot = (): AgentSnapshot => ({
       display_path: "DISPLAY1",
       qualified: true,
       current_percent: 61,
-      target_percent: 61,
+      target_percent: environmentMode ? 55 : 61,
       transition_active: false,
       manual_override_remaining_ms: null,
       ddc_error_count: 0,
@@ -143,12 +150,12 @@ const demoSnapshot = (): AgentSnapshot => ({
     },
   ],
   relay: {
-    available: true,
-    light_on: true,
-    energized: true,
-    rules_enabled: demoSettings.settings.relay.rules_enabled,
-    matched_rule_id: "evening-light",
-    matched_rule_name: "Evening light",
+    available: !environmentMode,
+    light_on: environmentMode ? null : true,
+    energized: environmentMode ? null : true,
+    rules_enabled: environmentMode ? false : demoSettings.settings.relay.rules_enabled,
+    matched_rule_id: environmentMode ? null : "evening-light",
+    matched_rule_name: environmentMode ? null : "Evening light",
     last_error: null,
   },
   environment: {
@@ -156,9 +163,16 @@ const demoSnapshot = (): AgentSnapshot => ({
     now_minutes: new Date().getHours() * 60 + new Date().getMinutes(),
     sunrise_minutes: 314,
     sunset_minutes: 1158,
+    solar_elevation_degrees: 38.4,
+    daylight_minutes: 844,
+    day_of_year: 203,
     timezone: "Asia/Shanghai",
     weather: "cloudy",
+    cloud_cover_percent: 72,
+    precipitation_probability_percent: 10,
     weather_observed_at_unix_ms: Date.now() - 95_000,
+    base_brightness_percent: environmentMode ? 51 : 61,
+    brightness_offset_percent: demoSettings.settings.control.environment_brightness_offset,
     last_error: null,
   },
   resources: {
@@ -170,7 +184,8 @@ const demoSnapshot = (): AgentSnapshot => ({
     handle_count: 132,
     working_set_bytes: 18_874_368,
   },
-});
+  });
+};
 
 const delay = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 

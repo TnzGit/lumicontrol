@@ -8,6 +8,18 @@ The authoritative dependency inventories are:
 - `apps/lumi-ui/package-lock.json` for JavaScript dependencies
 - the ESP32 Arduino core and ArduinoJson manifests used to build the firmware
 
+## Open-Meteo Weather Data
+
+When Weather & sun mode or a weather-dependent light rule is enabled,
+LumiControl requests forecast data from the Open-Meteo API. Open-Meteo data is
+made available under the Creative Commons Attribution 4.0 International
+license (CC BY 4.0). The data is transformed into a local brightness
+recommendation; Open-Meteo does not endorse LumiControl.
+
+- Provider: [Open-Meteo](https://open-meteo.com/)
+- API documentation: [open-meteo.com/en/docs](https://open-meteo.com/en/docs)
+- License: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+
 The current dependency metadata includes MIT, Apache-2.0, BSD, ISC, 0BSD,
 BSL-1.0, MPL-2.0, Unicode-3.0, Zlib, CC0-1.0, CC-BY-4.0, OFL-1.1,
 Ubuntu-font-1.0, CDLA-Permissive-2.0, and Unlicense terms. Where a dependency

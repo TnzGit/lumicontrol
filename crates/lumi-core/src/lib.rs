@@ -5,6 +5,16 @@ use std::fmt;
 
 pub const MIN_BRIGHTNESS: i32 = 0;
 pub const MAX_BRIGHTNESS: i32 = 100;
+pub const MIN_ENVIRONMENT_BRIGHTNESS_OFFSET: i32 = -50;
+pub const MAX_ENVIRONMENT_BRIGHTNESS_OFFSET: i32 = 50;
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrightnessSource {
+    #[default]
+    Sensor,
+    Environment,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SensorCurvePoint {
@@ -91,6 +101,115 @@ pub fn map_normalized_lux_to_brightness(lux: f64, curve: &[SensorCurvePoint]) ->
         }
     }
     last.brightness
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvironmentWeatherInput {
+    pub kind: WeatherKind,
+    pub cloud_cover_percent: i32,
+    pub visibility_km: f64,
+    pub precipitation_probability: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvironmentBrightnessInput {
+    pub solar_elevation_degrees: f64,
+    pub day_of_year: u32,
+    pub latitude: f64,
+    pub sunrise_minutes: Option<i32>,
+    pub sunset_minutes: Option<i32>,
+    pub weather: Option<EnvironmentWeatherInput>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvironmentBrightnessRecommendation {
+    pub base_percent: i32,
+    pub adjusted_percent: i32,
+    pub daylight_factor: f64,
+    pub season_factor: f64,
+    pub weather_factor: f64,
+}
+
+pub fn recommend_environment_brightness(
+    input: EnvironmentBrightnessInput,
+    night_target_percent: i32,
+    daytime_peak_percent: i32,
+    offset_percent: i32,
+) -> EnvironmentBrightnessRecommendation {
+    let night = normalize_brightness(night_target_percent);
+    let day = normalize_brightness(daytime_peak_percent).max(night);
+    let elevation = if input.solar_elevation_degrees.is_finite() {
+        input.solar_elevation_degrees
+    } else {
+        -90.0
+    };
+
+    // Civil twilight starts at -6 degrees. Smootherstep keeps both velocity and
+    // acceleration continuous as the recommendation moves into daytime.
+    let daylight_factor = smootherstep((elevation + 6.0) / 51.0);
+    let season_factor = environment_season_factor(input);
+    let weather_factor = input.weather.map(environment_weather_factor).unwrap_or(1.0);
+    let effective_daylight = (daylight_factor * season_factor * weather_factor).clamp(0.0, 1.0);
+    let base_percent = normalize_brightness(
+        (night as f64 + f64::from(day - night) * effective_daylight).round() as i32,
+    );
+    let offset = offset_percent.clamp(
+        MIN_ENVIRONMENT_BRIGHTNESS_OFFSET,
+        MAX_ENVIRONMENT_BRIGHTNESS_OFFSET,
+    );
+
+    EnvironmentBrightnessRecommendation {
+        base_percent,
+        adjusted_percent: normalize_brightness(base_percent + offset),
+        daylight_factor,
+        season_factor,
+        weather_factor,
+    }
+}
+
+fn environment_season_factor(input: EnvironmentBrightnessInput) -> f64 {
+    if let (Some(sunrise), Some(sunset)) = (input.sunrise_minutes, input.sunset_minutes) {
+        let daylight_minutes = (sunset - sunrise).rem_euclid(24 * 60);
+        if daylight_minutes > 0 {
+            let centered =
+                (f64::from(daylight_minutes.clamp(6 * 60, 18 * 60)) - 12.0 * 60.0) / (6.0 * 60.0);
+            return (1.0 + 0.08 * centered).clamp(0.92, 1.08);
+        }
+    }
+
+    let day = input.day_of_year.clamp(1, 366) as f64;
+    let hemisphere = if input.latitude < 0.0 { -1.0 } else { 1.0 };
+    let latitude_strength = (input.latitude.abs() / 66.5).clamp(0.0, 1.0);
+    let seasonal_alignment = (std::f64::consts::TAU * (day - 172.0) / 365.2425).cos() * hemisphere;
+    (1.0 + 0.08 * latitude_strength * seasonal_alignment).clamp(0.92, 1.08)
+}
+
+fn environment_weather_factor(weather: EnvironmentWeatherInput) -> f64 {
+    let cloud_cover = f64::from(weather.cloud_cover_percent.clamp(0, 100)) / 100.0;
+    let precipitation = if weather.precipitation_probability.is_finite() {
+        weather.precipitation_probability.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let visibility = if weather.visibility_km.is_finite() {
+        weather.visibility_km.max(0.0)
+    } else {
+        20.0
+    };
+    let kind_factor = match weather.kind {
+        WeatherKind::Clear => 1.03,
+        WeatherKind::Cloudy => 0.95,
+        WeatherKind::Rain => 0.84,
+        WeatherKind::Fog => 0.80,
+    };
+    let cloud_factor = 1.0 - 0.32 * cloud_cover.powf(1.25);
+    let precipitation_factor = 1.0 - 0.14 * precipitation;
+    let visibility_factor = if visibility >= 10.0 {
+        1.0
+    } else {
+        0.75 + 0.25 * (visibility / 10.0)
+    };
+    (kind_factor * cloud_factor * precipitation_factor * visibility_factor).clamp(0.45, 1.05)
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
@@ -610,6 +729,107 @@ impl std::error::Error for CoreError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn environment_input(
+        elevation: f64,
+        sunrise_minutes: i32,
+        sunset_minutes: i32,
+        weather: Option<EnvironmentWeatherInput>,
+    ) -> EnvironmentBrightnessInput {
+        EnvironmentBrightnessInput {
+            solar_elevation_degrees: elevation,
+            day_of_year: 172,
+            latitude: 31.2304,
+            sunrise_minutes: Some(sunrise_minutes),
+            sunset_minutes: Some(sunset_minutes),
+            weather,
+        }
+    }
+
+    #[test]
+    fn environment_brightness_keeps_night_stable_and_applies_offset() {
+        let recommendation =
+            recommend_environment_brightness(environment_input(-12.0, 330, 1_170, None), 18, 90, 7);
+        assert_eq!(recommendation.base_percent, 18);
+        assert_eq!(recommendation.adjusted_percent, 25);
+        assert_eq!(recommendation.daylight_factor, 0.0);
+    }
+
+    #[test]
+    fn environment_brightness_responds_to_sun_weather_and_season() {
+        let clear = EnvironmentWeatherInput {
+            kind: WeatherKind::Clear,
+            cloud_cover_percent: 10,
+            visibility_km: 20.0,
+            precipitation_probability: 0.0,
+        };
+        let cloudy = EnvironmentWeatherInput {
+            kind: WeatherKind::Cloudy,
+            cloud_cover_percent: 80,
+            visibility_km: 12.0,
+            precipitation_probability: 0.1,
+        };
+        let rain = EnvironmentWeatherInput {
+            kind: WeatherKind::Rain,
+            cloud_cover_percent: 95,
+            visibility_km: 5.0,
+            precipitation_probability: 0.8,
+        };
+        let clear_target = recommend_environment_brightness(
+            environment_input(35.0, 300, 1_260, Some(clear)),
+            18,
+            90,
+            0,
+        );
+        let cloudy_target = recommend_environment_brightness(
+            environment_input(35.0, 300, 1_260, Some(cloudy)),
+            18,
+            90,
+            0,
+        );
+        let rain_target = recommend_environment_brightness(
+            environment_input(35.0, 300, 1_260, Some(rain)),
+            18,
+            90,
+            0,
+        );
+        assert!(clear_target.base_percent > cloudy_target.base_percent);
+        assert!(cloudy_target.base_percent > rain_target.base_percent);
+
+        let winter = recommend_environment_brightness(
+            environment_input(20.0, 480, 960, Some(clear)),
+            18,
+            90,
+            0,
+        );
+        let summer = recommend_environment_brightness(
+            environment_input(20.0, 240, 1_200, Some(clear)),
+            18,
+            90,
+            0,
+        );
+        assert!(summer.season_factor > winter.season_factor);
+        assert!(summer.base_percent > winter.base_percent);
+    }
+
+    #[test]
+    fn environment_brightness_is_monotonic_and_bounded() {
+        let low = recommend_environment_brightness(
+            environment_input(2.0, 360, 1_080, None),
+            12,
+            92,
+            -100,
+        );
+        let high = recommend_environment_brightness(
+            environment_input(40.0, 360, 1_080, None),
+            12,
+            92,
+            100,
+        );
+        assert!(high.base_percent > low.base_percent);
+        assert_eq!(low.adjusted_percent, 0);
+        assert_eq!(high.adjusted_percent, 100);
+    }
 
     #[test]
     fn curve_interpolates_in_log_lux_space() {

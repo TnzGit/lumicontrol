@@ -1,7 +1,8 @@
 use lumi_core::{
-    default_sensor_curve, normalize_brightness, normalize_sensor_curve, ConditionExpression,
-    LightAction, LightCondition, LightRule, LogLuxFilterConfig, ManualOverrideConfig,
-    RelayContactMode, SensorCurvePoint, TransitionSpec, WeatherKind,
+    default_sensor_curve, normalize_brightness, normalize_sensor_curve, BrightnessSource,
+    ConditionExpression, LightAction, LightCondition, LightRule, LogLuxFilterConfig,
+    ManualOverrideConfig, RelayContactMode, SensorCurvePoint, TransitionSpec, WeatherKind,
+    MAX_ENVIRONMENT_BRIGHTNESS_OFFSET, MIN_ENVIRONMENT_BRIGHTNESS_OFFSET,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -54,6 +55,11 @@ impl SettingsDocument {
             normalize_brightness(self.settings.control.daytime_peak_brightness);
         self.settings.control.night_target_brightness =
             normalize_brightness(self.settings.control.night_target_brightness);
+        self.settings.control.environment_brightness_offset =
+            self.settings.control.environment_brightness_offset.clamp(
+                MIN_ENVIRONMENT_BRIGHTNESS_OFFSET,
+                MAX_ENVIRONMENT_BRIGHTNESS_OFFSET,
+            );
         self.settings.control.target_deadband = self.settings.control.target_deadband.clamp(0, 20);
         self.settings.control.manual_override.detection_threshold = self
             .settings
@@ -114,6 +120,13 @@ impl SettingsDocument {
         {
             problems.push("day and night brightness must be in 0..=100".to_string());
         }
+        if !(MIN_ENVIRONMENT_BRIGHTNESS_OFFSET..=MAX_ENVIRONMENT_BRIGHTNESS_OFFSET)
+            .contains(&self.settings.control.environment_brightness_offset)
+        {
+            problems.push(format!(
+                "environment brightness offset must be in {MIN_ENVIRONMENT_BRIGHTNESS_OFFSET}..={MAX_ENVIRONMENT_BRIGHTNESS_OFFSET}"
+            ));
+        }
         let manual_override = self.settings.control.manual_override;
         if !(1..=100).contains(&manual_override.detection_threshold) {
             problems.push("manual override detection_threshold must be in 1..=100".to_string());
@@ -136,6 +149,17 @@ impl SettingsDocument {
             }
             if self.settings.weather.timezone.trim().is_empty() {
                 problems.push("weather timezone must not be empty".to_string());
+            }
+        }
+        if self.settings.control.brightness_source == BrightnessSource::Environment {
+            if !self.settings.weather.enabled {
+                problems.push(
+                    "weather and solar settings must be enabled for environment brightness"
+                        .to_string(),
+                );
+            }
+            if self.settings.weather.location_name.trim().is_empty() {
+                problems.push("a location name is required for environment brightness".to_string());
             }
         }
         if !(60..=MAX_WEATHER_REFRESH_SECONDS).contains(&self.settings.weather.refresh_seconds) {
@@ -322,6 +346,8 @@ pub enum ThemeMode {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ControlSettings {
+    pub brightness_source: BrightnessSource,
+    pub environment_brightness_offset: i32,
     pub sensor_curve: Vec<SensorCurvePoint>,
     pub filter: LogLuxFilterConfig,
     pub target_deadband: i32,
@@ -334,6 +360,8 @@ pub struct ControlSettings {
 impl Default for ControlSettings {
     fn default() -> Self {
         Self {
+            brightness_source: BrightnessSource::Sensor,
+            environment_brightness_offset: 0,
             sensor_curve: default_sensor_curve(),
             filter: LogLuxFilterConfig::default(),
             target_deadband: 2,
@@ -1314,6 +1342,7 @@ mod tests {
         let mut document = SettingsDocument::default();
         document.settings.weather.refresh_seconds = u64::MAX;
         document.settings.control.manual_override.grace_period_ms = u64::MAX;
+        document.settings.control.environment_brightness_offset = i32::MAX;
         document
             .settings
             .control
@@ -1336,6 +1365,24 @@ mod tests {
                 .detection_threshold,
             1
         );
+        assert_eq!(
+            document.settings.control.environment_brightness_offset,
+            MAX_ENVIRONMENT_BRIGHTNESS_OFFSET
+        );
+        document.validate().unwrap();
+    }
+
+    #[test]
+    fn environment_brightness_requires_an_enabled_named_location() {
+        let mut document = SettingsDocument::default();
+        document.settings.control.brightness_source = BrightnessSource::Environment;
+        assert!(document.validate().is_err());
+
+        document.settings.weather.enabled = true;
+        document.settings.weather.location_name = "Shanghai".to_string();
+        document.settings.weather.latitude = 31.2304;
+        document.settings.weather.longitude = 121.4737;
+        document.settings.weather.timezone = "Asia/Shanghai".to_string();
         document.validate().unwrap();
     }
 }

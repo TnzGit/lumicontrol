@@ -13,6 +13,26 @@ function age(milliseconds: number | null): string {
   return seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ago`;
 }
 
+function clock(minutes: number | null): string {
+  if (minutes == null) return "--:--";
+  const normalized = ((minutes % 1_440) + 1_440) % 1_440;
+  return `${String(Math.floor(normalized / 60)).padStart(2, "0")}:${String(normalized % 60).padStart(2, "0")}`;
+}
+
+function duration(minutes: number | null): string {
+  if (minutes == null) return "--";
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function signedPercent(value: number): string {
+  return `${value > 0 ? "+" : ""}${value}%`;
+}
+
+function weatherLabel(value: AgentSnapshot["environment"]["weather"]): string {
+  if (value == null) return "Solar model";
+  return { clear: "Clear", cloudy: "Cloudy", rain: "Rain", fog: "Fog" }[value];
+}
+
 export default function StatusView({
   snapshot,
   onResume,
@@ -105,20 +125,45 @@ export default function StatusView({
         )}
       </Section>
 
-      <Section
-        title="Sensor"
-        action={
-          <StatusPill tone={snapshot.sensor.valid ? "good" : "bad"}>
-            {snapshot.sensor.valid ? "Live" : "Unavailable"}
-          </StatusPill>
-        }
-      >
-        <div className="sensor-line">
-          <strong>{snapshot.sensor.filtered_lux == null ? "--" : snapshot.sensor.filtered_lux.toFixed(1)} lux</strong>
-          <span>{snapshot.device.port_name ?? "No port"}</span>
-          <span>{age(snapshot.sensor.sample_age_ms)}</span>
-        </div>
-      </Section>
+      {snapshot.brightness_source === "sensor" ? (
+        <Section
+          title="Sensor"
+          action={
+            <StatusPill tone={snapshot.sensor.valid ? "good" : "bad"}>
+              {snapshot.sensor.valid ? "Live" : "Unavailable"}
+            </StatusPill>
+          }
+        >
+          <div className="sensor-line">
+            <strong>{snapshot.sensor.filtered_lux == null ? "--" : snapshot.sensor.filtered_lux.toFixed(1)} lux</strong>
+            <span>{snapshot.device.port_name ?? "No port"}</span>
+            <span>{age(snapshot.sensor.sample_age_ms)}</span>
+          </div>
+        </Section>
+      ) : (
+        <Section
+          title="Weather & Sun"
+          action={
+            <StatusPill tone={snapshot.environment.last_error ? "warning" : snapshot.environment.weather ? "good" : "neutral"}>
+              {snapshot.environment.last_error ? "Solar fallback" : snapshot.environment.weather ? "Live weather" : "Updating"}
+            </StatusPill>
+          }
+        >
+          <div className="environment-line">
+            <strong>{weatherLabel(snapshot.environment.weather)}</strong>
+            <span>Sun {snapshot.environment.solar_elevation_degrees == null ? "--" : `${snapshot.environment.solar_elevation_degrees.toFixed(1)}°`}</span>
+            <span>{clock(snapshot.environment.sunrise_minutes)}–{clock(snapshot.environment.sunset_minutes)}</span>
+            <span>Daylight {duration(snapshot.environment.daylight_minutes)}</span>
+          </div>
+          <div className="recommendation-line">
+            <span>Model <strong>{percent(snapshot.environment.base_brightness_percent)}</strong></span>
+            <span>Offset <strong>{signedPercent(snapshot.environment.brightness_offset_percent)}</strong></span>
+            {snapshot.environment.weather_observed_at_unix_ms != null && (
+              <span>Weather {age(Math.max(0, Date.now() - snapshot.environment.weather_observed_at_unix_ms))}</span>
+            )}
+          </div>
+        </Section>
+      )}
 
       {overridden.length > 0 && (
         <InlineNotice tone="warning">

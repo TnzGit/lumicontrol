@@ -19,7 +19,9 @@ LumiControl es un controlador de brillo ambiental para Windows. Un ESP32-C3 con
 sensor GY-302/BH1750 proporciona lecturas de lux en tiempo real, y un Agent ligero
 en segundo plano ajusta suavemente los monitores DDC/CI según tu curva de
 calibración. El firmware opcional con relé también puede controlar una tira de luz
-de baja tensión situada en el escritorio o detrás del monitor.
+de baja tensión situada en el escritorio o detrás del monitor. También puede
+funcionar sin sensor mediante el tiempo local, la altura solar, el amanecer, el
+atardecer y la duración estacional del día.
 
 ## Descarga
 
@@ -35,7 +37,8 @@ Descarga el instalador más reciente para Windows x64 desde
 
 - Windows 10 u 11, x64
 - un monitor con DDC/CI activado en su menú en pantalla
-- un ESP32-C3 SuperMini con sensor ambiental GY-302/BH1750
+- conexión y ubicación para **Weather & sun**, o un ESP32-C3 SuperMini con sensor
+  GY-302/BH1750 para **USB sensor**
 - un módulo de relé de 5 V compatible si se desea controlar una tira de luz
 
 Después de instalar, conecta el sensor por USB y abre LumiControl. El hardware
@@ -45,6 +48,7 @@ lux-brillo a la habitación y a cada monitor.
 ## Funciones principales
 
 - Agent residente de bajo consumo y una interfaz Tauri que se abre bajo demanda
+- recomendación sin hardware basada en tiempo, sol, estación y ajuste personal
 - detección USB automática para perfiles con sensor o sensor y relé
 - transiciones DDC/CI suaves cuyo objetivo puede cambiar durante el movimiento
 - curva de calibración arrastrable con historial de tres pasos

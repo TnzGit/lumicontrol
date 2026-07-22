@@ -7,6 +7,7 @@ export type DeviceConnectionState =
   | "fault";
 export type Capability = "ambient_lux" | "relay";
 export type ThemeMode = "light" | "dark" | "system";
+export type BrightnessSource = "sensor" | "environment";
 export type RelayContactMode = "no" | "nc";
 export type LightAction = "keep" | "on" | "off";
 export type WeatherKind = "clear" | "cloudy" | "rain" | "fog";
@@ -64,9 +65,16 @@ export interface EnvironmentSnapshot {
   now_minutes: number;
   sunrise_minutes: number | null;
   sunset_minutes: number | null;
+  solar_elevation_degrees: number | null;
+  daylight_minutes: number | null;
+  day_of_year: number | null;
   timezone: string | null;
   weather: WeatherKind | null;
+  cloud_cover_percent: number | null;
+  precipitation_probability_percent: number | null;
   weather_observed_at_unix_ms: number | null;
+  base_brightness_percent: number | null;
+  brightness_offset_percent: number;
   last_error: string | null;
 }
 
@@ -88,6 +96,7 @@ export interface AgentSnapshot {
   status_message: string;
   configuration_warning: string | null;
   paused: boolean;
+  brightness_source: BrightnessSource;
   target_percent: number | null;
   device: DeviceSnapshot;
   sensor: SensorSnapshot;
@@ -175,6 +184,8 @@ export interface SettingsDocument {
     locale: string;
     theme: ThemeMode;
     control: {
+      brightness_source: BrightnessSource;
+      environment_brightness_offset: number;
       sensor_curve: SensorCurvePoint[];
       filter: FilterSettings;
       target_deadband: number;

@@ -3,8 +3,9 @@ mod support;
 pub use support::StartupRegistration;
 
 use lumi_core::{
-    evaluate_rules, map_normalized_lux_to_brightness, ConditionExpression, LightAction,
-    LightCondition, LogLuxFilter, ManualOverrideGuard, RuleContext, TargetStabilizer,
+    evaluate_rules, map_normalized_lux_to_brightness, recommend_environment_brightness,
+    BrightnessSource, ConditionExpression, EnvironmentBrightnessInput, EnvironmentWeatherInput,
+    LightAction, LightCondition, LogLuxFilter, ManualOverrideGuard, RuleContext, TargetStabilizer,
 };
 use lumi_device::{
     discover_device, DeviceEvent, DevicePortProvider, DiscoveryPolicy, ReconnectBackoff,
@@ -48,6 +49,8 @@ const ESP32_C3_USB_ID: UsbId = UsbId {
 };
 
 type CommandResult = Result<ResponsePayload, IpcWireError>;
+pub type WeatherFetcher =
+    dyn Fn(&WeatherRequest) -> Result<WeatherObservation, String> + Send + Sync;
 
 pub struct AgentOptions {
     pub store: SettingsStore,
@@ -56,6 +59,7 @@ pub struct AgentOptions {
     pub device_provider: Arc<dyn DevicePortProvider>,
     pub pipe_name: String,
     pub startup_registration: Arc<dyn StartupRegistration>,
+    pub weather_fetcher: Arc<WeatherFetcher>,
     pub install_crash_hook: bool,
 }
 
@@ -73,6 +77,9 @@ impl AgentOptions {
             device_provider: Arc::new(SerialPortProvider::default()),
             pipe_name: default_pipe_name()?,
             startup_registration: production_startup_registration().map_err(AgentError::Startup)?,
+            weather_fetcher: Arc::new(|request| {
+                fetch_open_meteo(request).map_err(|error| error.to_string())
+            }),
             install_crash_hook: true,
         })
     }
@@ -227,6 +234,7 @@ impl AgentProcess {
         let thread_shutdown = Arc::clone(&shutdown);
         let store = options.store;
         let startup_registration = options.startup_registration;
+        let weather_fetcher = options.weather_fetcher;
         let runtime_logger = logger.clone();
         let core_runtime_tx = runtime_tx.clone();
         let runtime_join = thread::Builder::new()
@@ -239,6 +247,7 @@ impl AgentProcess {
                     scheduler,
                     device_command_tx,
                     core_runtime_tx,
+                    weather_fetcher,
                 };
                 let shared = RuntimeSharedState {
                     thread_snapshots,
@@ -489,12 +498,19 @@ fn recompute_health(snapshot: &mut AgentSnapshot) {
     } else if !qualified_monitor {
         snapshot.health = HealthLevel::Fault;
         snapshot.status_message = "No compatible DDC/CI monitor".to_string();
-    } else if snapshot.device.state != DeviceConnectionState::Connected {
+    } else if snapshot.brightness_source == BrightnessSource::Sensor
+        && snapshot.device.state != DeviceConnectionState::Connected
+    {
         snapshot.health = HealthLevel::Degraded;
         snapshot.status_message = "Looking for Lumi sensor".to_string();
-    } else if !snapshot.sensor.valid {
+    } else if snapshot.brightness_source == BrightnessSource::Sensor && !snapshot.sensor.valid {
         snapshot.health = HealthLevel::Degraded;
         snapshot.status_message = "Waiting for a valid light reading".to_string();
+    } else if snapshot.brightness_source == BrightnessSource::Environment
+        && snapshot.environment.base_brightness_percent.is_none()
+    {
+        snapshot.health = HealthLevel::Degraded;
+        snapshot.status_message = "Preparing weather and sunlight model".to_string();
     } else if snapshot
         .monitors
         .iter()
@@ -504,10 +520,18 @@ fn recompute_health(snapshot: &mut AgentSnapshot) {
         snapshot.status_message = "A monitor needs attention".to_string();
     } else if snapshot.environment.configured && snapshot.environment.last_error.is_some() {
         snapshot.health = HealthLevel::Degraded;
-        snapshot.status_message = "Weather data is temporarily unavailable".to_string();
+        snapshot.status_message = if snapshot.brightness_source == BrightnessSource::Environment {
+            "Using sunlight model; live weather is unavailable".to_string()
+        } else {
+            "Weather data is temporarily unavailable".to_string()
+        };
     } else {
         snapshot.health = HealthLevel::Healthy;
-        snapshot.status_message = "Automatic control is working".to_string();
+        snapshot.status_message = if snapshot.brightness_source == BrightnessSource::Environment {
+            "Automatic control is using weather and sunlight".to_string()
+        } else {
+            "Automatic control is working".to_string()
+        };
     }
 }
 
@@ -796,6 +820,7 @@ struct RuntimeServices {
     scheduler: TransitionScheduler,
     device_command_tx: Sender<DeviceCommand>,
     core_runtime_tx: Sender<RuntimeMessage>,
+    weather_fetcher: Arc<WeatherFetcher>,
 }
 
 struct RuntimeSharedState {
@@ -812,6 +837,7 @@ struct AgentRuntime {
     scheduler: TransitionScheduler,
     device_tx: Sender<DeviceCommand>,
     runtime_tx: Sender<RuntimeMessage>,
+    weather_fetcher: Arc<WeatherFetcher>,
     snapshots: Arc<SnapshotStore>,
     shared_settings: Arc<RwLock<SettingsDocument>>,
     shutdown: Arc<ShutdownSignal>,
@@ -852,6 +878,7 @@ impl AgentRuntime {
             scheduler: services.scheduler,
             device_tx: services.device_command_tx,
             runtime_tx: services.core_runtime_tx,
+            weather_fetcher: services.weather_fetcher,
             snapshots: shared.thread_snapshots,
             shared_settings: shared.thread_settings,
             shutdown: shared.thread_shutdown,
@@ -886,8 +913,11 @@ impl AgentRuntime {
         self.logger.info("agent_ready", "Agent runtime is ready");
         self.snapshots.update(|snapshot| {
             snapshot.environment.configured = self.document.settings.weather.enabled;
+            snapshot.brightness_source = self.document.settings.control.brightness_source;
         });
         self.refresh_monitors();
+        self.maybe_schedule_weather();
+        self.update_environment_control();
         let mut running = true;
         while running {
             let timeout = self
@@ -953,6 +983,7 @@ impl AgentRuntime {
             }
         }
         self.maybe_schedule_weather();
+        self.update_environment_control();
     }
 
     fn handle_system_event(&mut self, event: SystemEvent) {
@@ -1002,6 +1033,8 @@ impl AgentRuntime {
                 });
                 self.refresh_monitors();
                 let _ = self.device_tx.send(DeviceCommand::Refresh);
+                self.maybe_schedule_weather();
+                self.update_environment_control();
             }
         }
     }
@@ -1138,6 +1171,8 @@ impl AgentRuntime {
                 "Connected Lumi Sensor has no relay capability",
             ));
         }
+        let source_changed = self.document.settings.control.brightness_source
+            != document.settings.control.brightness_source;
         let weather_changed = self.document.settings.weather != document.settings.weather;
         let previous_start_at_login = self.document.settings.start_at_login;
         let startup_changed = previous_start_at_login != document.settings.start_at_login;
@@ -1167,6 +1202,10 @@ impl AgentRuntime {
         self.filter = LogLuxFilter::new(document.settings.control.filter)
             .map_err(|error| wire_error(IpcErrorCode::InvalidSettings, error.to_string()))?;
         self.stabilizer = TargetStabilizer::new(document.settings.control.target_deadband);
+        if source_changed {
+            self.last_target = None;
+            self.last_sensor = None;
+        }
         let override_config = document.settings.control.manual_override;
         for state in self.monitor_state.values_mut() {
             state.guard = ManualOverrideGuard::new(override_config);
@@ -1190,8 +1229,12 @@ impl AgentRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = document;
         self.snapshots.update(|snapshot| {
             snapshot.paused = self.document.settings.paused;
+            snapshot.brightness_source = self.document.settings.control.brightness_source;
             snapshot.relay.rules_enabled = self.document.settings.relay.rules_enabled;
             snapshot.environment.configured = self.document.settings.weather.enabled;
+            if source_changed {
+                snapshot.target_percent = None;
+            }
             if weather_changed {
                 snapshot.environment = EnvironmentSnapshot {
                     configured: self.document.settings.weather.enabled,
@@ -1199,7 +1242,10 @@ impl AgentRuntime {
                 };
             }
         });
-        self.apply_last_target();
+        self.maybe_schedule_weather();
+        if !self.update_environment_control() {
+            self.apply_last_target();
+        }
         self.evaluate_relay_rules();
         self.logger.info("settings_saved", "Settings were updated");
         Ok(())
@@ -1322,18 +1368,27 @@ impl AgentRuntime {
             Err(_) => return,
         };
         self.last_sensor = Some(Instant::now());
-        let candidate = map_normalized_lux_to_brightness(
-            filtered,
-            &self.document.settings.control.sensor_curve,
-        );
-        let target = self.stabilizer.update(candidate);
-        let changed = self.last_target != Some(target);
-        self.last_target = Some(target);
+        let target = if self.document.settings.control.brightness_source == BrightnessSource::Sensor
+        {
+            let candidate = map_normalized_lux_to_brightness(
+                filtered,
+                &self.document.settings.control.sensor_curve,
+            );
+            Some(self.stabilizer.update(candidate))
+        } else {
+            None
+        };
+        let changed = target.is_some_and(|target| self.last_target != Some(target));
+        if let Some(target) = target {
+            self.last_target = Some(target);
+        }
         self.snapshots.record_sensor_sample(|snapshot| {
             snapshot.sensor.raw_lux = Some(lux);
             snapshot.sensor.filtered_lux = Some(filtered);
             snapshot.sensor.valid = true;
-            snapshot.target_percent = Some(target);
+            if let Some(target) = target {
+                snapshot.target_percent = Some(target);
+            }
         });
         if changed {
             self.apply_last_target();
@@ -1411,7 +1466,10 @@ impl AgentRuntime {
         self.maybe_schedule_weather();
         let snapshot = self.snapshots.get();
         let current_brightness = mean_brightness(&snapshot.monitors);
-        let environment = self.environment_snapshot();
+        let mut environment = self.environment_snapshot();
+        if self.document.settings.control.brightness_source == BrightnessSource::Environment {
+            environment.base_brightness_percent = snapshot.environment.base_brightness_percent;
+        }
         let context = RuleContext {
             now_minutes: environment.now_minutes,
             sunrise_minutes: environment.sunrise_minutes,
@@ -1450,6 +1508,11 @@ impl AgentRuntime {
         if !settings.enabled {
             return EnvironmentSnapshot {
                 now_minutes: local_minutes(),
+                brightness_offset_percent: self
+                    .document
+                    .settings
+                    .control
+                    .environment_brightness_offset,
                 ..EnvironmentSnapshot::default()
             };
         }
@@ -1484,31 +1547,102 @@ impl AgentRuntime {
             .weather_is_needed()
             .then(|| self.weather_error.clone())
             .flatten();
+        let sunrise_minutes = solar.and_then(|context| context.sunrise_minutes);
+        let sunset_minutes = solar.and_then(|context| context.sunset_minutes);
+        let daylight_minutes = sunrise_minutes
+            .zip(sunset_minutes)
+            .and_then(|(sunrise, sunset)| {
+                let duration = (sunset - sunrise).rem_euclid(24 * 60);
+                (duration > 0).then_some(duration)
+            });
         EnvironmentSnapshot {
             configured: true,
             now_minutes: solar.map_or_else(local_minutes, |context| context.now_minutes),
-            sunrise_minutes: solar.and_then(|context| context.sunrise_minutes),
-            sunset_minutes: solar.and_then(|context| context.sunset_minutes),
+            sunrise_minutes,
+            sunset_minutes,
+            solar_elevation_degrees: solar.map(|context| context.solar_elevation_degrees),
+            daylight_minutes,
+            day_of_year: solar.map(|context| context.day_of_year),
             timezone: solar
                 .map(|context| context.timezone.clone())
                 .or_else(|| Some(settings.timezone.clone())),
             weather: self.weather_observation.map(|observation| observation.kind),
+            cloud_cover_percent: self
+                .weather_observation
+                .map(|observation| observation.cloud_cover),
+            precipitation_probability_percent: self
+                .weather_observation
+                .map(|observation| (observation.precipitation_probability * 100.0).round() as i32),
             weather_observed_at_unix_ms: self.weather_observed_at_unix_ms,
+            base_brightness_percent: None,
+            brightness_offset_percent: self.document.settings.control.environment_brightness_offset,
             last_error: self.solar_error.clone().or(weather_error),
         }
     }
 
+    fn update_environment_control(&mut self) -> bool {
+        if self.document.settings.control.brightness_source != BrightnessSource::Environment {
+            return false;
+        }
+        let mut environment = self.environment_snapshot();
+        let recommendation = environment
+            .solar_elevation_degrees
+            .zip(environment.day_of_year)
+            .map(|(solar_elevation_degrees, day_of_year)| {
+                recommend_environment_brightness(
+                    EnvironmentBrightnessInput {
+                        solar_elevation_degrees,
+                        day_of_year,
+                        latitude: self.document.settings.weather.latitude,
+                        sunrise_minutes: environment.sunrise_minutes,
+                        sunset_minutes: environment.sunset_minutes,
+                        weather: self.weather_observation.map(|observation| {
+                            EnvironmentWeatherInput {
+                                kind: observation.kind,
+                                cloud_cover_percent: observation.cloud_cover,
+                                visibility_km: observation.visibility_km,
+                                precipitation_probability: observation.precipitation_probability,
+                            }
+                        }),
+                    },
+                    self.document.settings.control.night_target_brightness,
+                    self.document.settings.control.daytime_peak_brightness,
+                    self.document.settings.control.environment_brightness_offset,
+                )
+            });
+        environment.base_brightness_percent =
+            recommendation.map(|recommendation| recommendation.base_percent);
+        let target = recommendation
+            .map(|recommendation| self.stabilizer.update(recommendation.adjusted_percent));
+        let changed = target.is_some_and(|target| self.last_target != Some(target));
+        self.last_target = target;
+        self.snapshots.update_if(|snapshot| {
+            let snapshot_changed = snapshot.environment != environment
+                || snapshot.target_percent != target
+                || snapshot.brightness_source != BrightnessSource::Environment;
+            snapshot.environment = environment;
+            snapshot.target_percent = target;
+            snapshot.brightness_source = BrightnessSource::Environment;
+            snapshot_changed
+        });
+        if changed {
+            self.apply_last_target();
+        }
+        changed
+    }
+
     fn weather_is_needed(&self) -> bool {
         self.document.settings.weather.enabled
-            && self.document.settings.relay.rules_enabled
-            && self.capabilities.contains(&Capability::Relay)
-            && self
-                .document
-                .settings
-                .relay
-                .rules
-                .iter()
-                .any(|rule| rule.enabled && expression_uses_weather(&rule.when))
+            && (self.document.settings.control.brightness_source == BrightnessSource::Environment
+                || (self.document.settings.relay.rules_enabled
+                    && self.capabilities.contains(&Capability::Relay)
+                    && self
+                        .document
+                        .settings
+                        .relay
+                        .rules
+                        .iter()
+                        .any(|rule| rule.enabled && expression_uses_weather(&rule.when))))
     }
 
     fn maybe_schedule_weather(&mut self) {
@@ -1526,13 +1660,14 @@ impl AgentRuntime {
         );
         let generation = self.weather_generation;
         let runtime_tx = self.runtime_tx.clone();
+        let weather_fetcher = Arc::clone(&self.weather_fetcher);
         self.weather_fetch_in_flight = true;
         self.weather_next_refresh =
             Instant::now() + Duration::from_secs(settings.refresh_seconds.max(60));
         let spawn = thread::Builder::new()
             .name("lumi-weather-request".to_string())
             .spawn(move || {
-                let result = fetch_open_meteo(&request).map_err(|error| error.to_string());
+                let result = weather_fetcher(&request);
                 let _ = runtime_tx.send(RuntimeMessage::Environment(EnvironmentWorkerEvent {
                     generation,
                     result,
@@ -1565,10 +1700,13 @@ impl AgentRuntime {
                     "weather_unavailable",
                     "Weather context is temporarily unavailable",
                 );
+                self.weather_observation = None;
+                self.weather_observed_at_unix_ms = None;
                 self.weather_error = Some(error);
                 self.weather_next_refresh = Instant::now() + WEATHER_RETRY_AFTER;
             }
         }
+        self.update_environment_control();
         self.evaluate_relay_rules();
     }
 
@@ -2188,7 +2326,7 @@ impl From<std::io::Error> for AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumi_core::{LightRule, WeatherKind};
+    use lumi_core::{BrightnessSource, LightRule, WeatherKind};
     use lumi_device::{DeviceError, DevicePort, PortCandidate, PortKind, UsbId};
     use lumi_device_simulator::{SimulatedProfile, Simulator};
     use lumi_monitor_windows::{BrightnessRange, MonitorError, MonitorSession};
@@ -2295,6 +2433,18 @@ mod tests {
     struct SimProvider {
         opens: AtomicUsize,
         profile: SimulatedProfile,
+    }
+
+    struct EmptyProvider;
+
+    impl DevicePortProvider for EmptyProvider {
+        fn candidates(&self) -> Result<Vec<PortCandidate>, DeviceError> {
+            Ok(Vec::new())
+        }
+
+        fn open(&self, _candidate: &PortCandidate) -> Result<Box<dyn DevicePort>, DeviceError> {
+            Err(DeviceError::DiscoveryFailed(Vec::new()))
+        }
     }
 
     impl DevicePortProvider for SimProvider {
@@ -2404,9 +2554,10 @@ mod tests {
         }
     }
 
-    fn start_test_agent_with_startup(
-        profile: SimulatedProfile,
+    fn start_test_agent_with_provider(
+        device_provider: Arc<dyn DevicePortProvider>,
         startup_registration: Arc<dyn StartupRegistration>,
+        weather_fetcher: Arc<WeatherFetcher>,
     ) -> (AgentProcess, Arc<Mutex<i32>>) {
         let test_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -2428,16 +2579,35 @@ mod tests {
             monitor_backend: Arc::new(FakeMonitorBackend {
                 state: Arc::clone(&state),
             }),
-            device_provider: Arc::new(SimProvider {
-                opens: AtomicUsize::new(0),
-                profile,
-            }),
+            device_provider,
             pipe_name: pipe,
             startup_registration,
+            weather_fetcher,
             install_crash_hook: false,
         })
         .unwrap();
         (process, state)
+    }
+
+    fn start_test_agent_with_startup(
+        profile: SimulatedProfile,
+        startup_registration: Arc<dyn StartupRegistration>,
+    ) -> (AgentProcess, Arc<Mutex<i32>>) {
+        start_test_agent_with_provider(
+            Arc::new(SimProvider {
+                opens: AtomicUsize::new(0),
+                profile,
+            }),
+            startup_registration,
+            Arc::new(|_| {
+                Ok(WeatherObservation {
+                    kind: WeatherKind::Cloudy,
+                    cloud_cover: 72,
+                    visibility_km: 12.0,
+                    precipitation_probability: 0.1,
+                })
+            }),
+        )
     }
 
     fn start_test_agent(profile: SimulatedProfile) -> (AgentProcess, Arc<Mutex<i32>>) {
@@ -2464,6 +2634,120 @@ mod tests {
             snapshot.sensor.valid && snapshot.target_percent.is_some()
         });
         wait_until(Duration::from_secs(2), || *monitor.lock().unwrap() != 25);
+        process.shutdown();
+    }
+
+    #[test]
+    fn environment_control_works_without_a_lumi_device() {
+        let (process, monitor) = start_test_agent_with_provider(
+            Arc::new(EmptyProvider),
+            Arc::new(TestStartupRegistration),
+            Arc::new(|_| {
+                Ok(WeatherObservation {
+                    kind: WeatherKind::Cloudy,
+                    cloud_cover: 72,
+                    visibility_km: 12.0,
+                    precipitation_probability: 0.1,
+                })
+            }),
+        );
+        let handle = process.handle();
+        let mut document = handle.settings();
+        document.settings.control.brightness_source = BrightnessSource::Environment;
+        document.settings.control.environment_brightness_offset = 6;
+        document.settings.weather.enabled = true;
+        document.settings.weather.location_name = "Shanghai".to_string();
+        document.settings.weather.latitude = 31.2304;
+        document.settings.weather.longitude = 121.4737;
+        document.settings.weather.timezone = "Asia/Shanghai".to_string();
+        handle
+            .execute(AgentCommand::SaveSettings {
+                document: Box::new(document),
+            })
+            .unwrap();
+
+        wait_until(Duration::from_secs(2), || {
+            let snapshot = handle.snapshot();
+            snapshot.brightness_source == BrightnessSource::Environment
+                && snapshot.target_percent.is_some()
+                && snapshot.environment.base_brightness_percent.is_some()
+                && snapshot.environment.weather == Some(WeatherKind::Cloudy)
+        });
+        let snapshot = handle.snapshot();
+        assert_ne!(snapshot.device.state, DeviceConnectionState::Connected);
+        assert!(!snapshot.sensor.valid);
+        assert_eq!(
+            snapshot.target_percent,
+            snapshot
+                .environment
+                .base_brightness_percent
+                .map(|base| (base + 6).clamp(0, 100))
+        );
+        assert!(!snapshot.status_message.contains("sensor"));
+        wait_until(Duration::from_secs(2), || *monitor.lock().unwrap() != 25);
+        process.shutdown();
+    }
+
+    #[test]
+    fn environment_control_drops_stale_weather_after_a_fetch_failure() {
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_for_worker = Arc::clone(&fetch_count);
+        let (process, _) = start_test_agent_with_provider(
+            Arc::new(EmptyProvider),
+            Arc::new(TestStartupRegistration),
+            Arc::new(move |_| {
+                if fetch_count_for_worker.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(WeatherObservation {
+                        kind: WeatherKind::Rain,
+                        cloud_cover: 95,
+                        visibility_km: 4.0,
+                        precipitation_probability: 0.9,
+                    })
+                } else {
+                    Err("weather service unavailable".to_string())
+                }
+            }),
+        );
+        let handle = process.handle();
+        let mut document = handle.settings();
+        document.settings.control.brightness_source = BrightnessSource::Environment;
+        document.settings.weather.enabled = true;
+        document.settings.weather.location_name = "Shanghai".to_string();
+        document.settings.weather.latitude = 31.2304;
+        document.settings.weather.longitude = 121.4737;
+        document.settings.weather.timezone = "Asia/Shanghai".to_string();
+        handle
+            .execute(AgentCommand::SaveSettings {
+                document: Box::new(document),
+            })
+            .unwrap();
+
+        wait_until(Duration::from_secs(2), || {
+            handle.snapshot().environment.weather == Some(WeatherKind::Rain)
+        });
+        let rainy_base = handle
+            .snapshot()
+            .environment
+            .base_brightness_percent
+            .unwrap();
+
+        let mut document = handle.settings();
+        document.settings.weather.longitude += 0.0001;
+        handle
+            .execute(AgentCommand::SaveSettings {
+                document: Box::new(document),
+            })
+            .unwrap();
+        wait_until(Duration::from_secs(2), || {
+            handle.snapshot().environment.last_error.is_some()
+        });
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.environment.weather, None);
+        assert_eq!(snapshot.environment.weather_observed_at_unix_ms, None);
+        assert!(snapshot.environment.base_brightness_percent.is_some());
+        assert!(snapshot.environment.base_brightness_percent.unwrap() >= rainy_base);
+        assert!(snapshot.status_message.contains("sunlight model"));
         process.shutdown();
     }
 

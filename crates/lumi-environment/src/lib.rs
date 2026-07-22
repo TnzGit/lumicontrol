@@ -14,6 +14,8 @@ pub struct SolarContext {
     pub now_minutes: i32,
     pub sunrise_minutes: Option<i32>,
     pub sunset_minutes: Option<i32>,
+    pub solar_elevation_degrees: f64,
+    pub day_of_year: u32,
     pub date_key: i32,
     pub timezone: String,
 }
@@ -45,8 +47,7 @@ impl WeatherRequest {
                     .filter(|value| !value.trim().is_empty())
                     .map(str::to_string)
             })
-            .or_else(|| cfg!(debug_assertions).then(|| DEFAULT_OPEN_METEO_ENDPOINT.to_string()))
-            .unwrap_or_default();
+            .unwrap_or_else(|| DEFAULT_OPEN_METEO_ENDPOINT.to_string());
         Self {
             endpoint,
             api_key: std::env::var("LUMICONTROL_WEATHER_API_KEY")
@@ -122,10 +123,18 @@ pub fn solar_context_at(
         let local = now_utc.with_timezone(&parsed);
         (LocalMoment::from_datetime(&local), parsed.to_string())
     };
+    let now_minutes = moment.hour as i32 * 60 + moment.minute as i32;
     Ok(SolarContext {
-        now_minutes: moment.hour as i32 * 60 + moment.minute as i32,
+        now_minutes,
         sunrise_minutes: solar_event_minutes(latitude, longitude, moment, true),
         sunset_minutes: solar_event_minutes(latitude, longitude, moment, false),
+        solar_elevation_degrees: solar_elevation_degrees(
+            latitude,
+            longitude,
+            moment,
+            now_minutes as usize,
+        ),
+        day_of_year: moment.ordinal,
         date_key: moment.year * 1000 + moment.ordinal as i32,
         timezone: resolved_timezone,
     })
@@ -502,6 +511,8 @@ mod tests {
         assert!((330..=390).contains(&context.sunrise_minutes.unwrap()));
         assert!((1080..=1140).contains(&context.sunset_minutes.unwrap()));
         assert_eq!(context.now_minutes, 12 * 60);
+        assert!((55.0..=65.0).contains(&context.solar_elevation_degrees));
+        assert_eq!(context.day_of_year, 79);
     }
 
     #[test]

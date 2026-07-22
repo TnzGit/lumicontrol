@@ -19,7 +19,9 @@ LumiControl, Windows için ortam ışığına duyarlı bir monitör parlaklık
 denetleyicisidir. GY-302/BH1750 sensörlü bir ESP32-C3 anlık lux ölçümleri sağlar;
 düşük kaynak kullanan arka plan Agent'ı ise kalibrasyon eğrinize göre DDC/CI
 monitörlerini yumuşak biçimde ayarlar. İsteğe bağlı röle yazılımı, masa veya
-monitör arkasındaki düşük voltajlı bir ışık şeridini de kontrol edebilir.
+monitör arkasındaki düşük voltajlı bir ışık şeridini de kontrol edebilir. Sensör
+olmadan da yerel hava, güneş yüksekliği, gün doğumu, gün batımı ve mevsimsel gün
+uzunluğundan önerilen parlaklığı hesaplayabilir.
 
 ## İndirme
 
@@ -36,7 +38,8 @@ indirin.
 
 - Windows 10 veya Windows 11, x64
 - ekran menüsünde DDC/CI etkinleştirilmiş bir monitör
-- GY-302/BH1750 ortam ışığı sensörlü ESP32-C3 SuperMini
+- **Weather & sun** için internet ve konum ya da **USB sensor** için
+  GY-302/BH1750 sensörlü ESP32-C3 SuperMini
 - ışık şeridi kontrolü için isteğe bağlı, desteklenen 5 V röle modülü
 
 Kurulumdan sonra USB sensörünü bağlayıp LumiControl'ü açın. Desteklenen donanım
@@ -46,6 +49,7 @@ eğrisini ayarlayabilirsiniz.
 ## Öne çıkan özellikler
 
 - sürekli çalışan düşük kaynaklı Windows Agent'ı ve isteğe bağlı Tauri arayüzü
+- hava, güneş, mevsim ve kişisel ofsete dayalı donanımsız parlaklık önerisi
 - yalnız sensör ve sensör+röle profilleri için otomatik USB keşfi
 - hareket sırasında hedefi değiştirilebilen yumuşak DDC/CI parlaklık geçişleri
 - sürüklenebilir kalibrasyon eğrisi ve üç adımlı geri alma geçmişi

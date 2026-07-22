@@ -1,4 +1,4 @@
-use lumi_core::WeatherKind;
+use lumi_core::{BrightnessSource, WeatherKind};
 use lumi_protocol::Capability;
 use lumi_store::SettingsDocument;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -221,9 +221,16 @@ pub struct EnvironmentSnapshot {
     pub now_minutes: i32,
     pub sunrise_minutes: Option<i32>,
     pub sunset_minutes: Option<i32>,
+    pub solar_elevation_degrees: Option<f64>,
+    pub daylight_minutes: Option<i32>,
+    pub day_of_year: Option<u32>,
     pub timezone: Option<String>,
     pub weather: Option<WeatherKind>,
+    pub cloud_cover_percent: Option<i32>,
+    pub precipitation_probability_percent: Option<i32>,
     pub weather_observed_at_unix_ms: Option<u64>,
+    pub base_brightness_percent: Option<i32>,
+    pub brightness_offset_percent: i32,
     pub last_error: Option<String>,
 }
 
@@ -247,6 +254,7 @@ pub struct AgentSnapshot {
     pub status_message: String,
     pub configuration_warning: Option<String>,
     pub paused: bool,
+    pub brightness_source: BrightnessSource,
     pub target_percent: Option<i32>,
     pub device: DeviceSnapshot,
     pub sensor: SensorSnapshot,
@@ -266,6 +274,7 @@ impl Default for AgentSnapshot {
             status_message: "Starting".to_string(),
             configuration_warning: None,
             paused: false,
+            brightness_source: BrightnessSource::Sensor,
             target_percent: None,
             device: DeviceSnapshot::default(),
             sensor: SensorSnapshot::default(),

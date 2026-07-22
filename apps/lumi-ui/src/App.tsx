@@ -236,7 +236,10 @@ export default function App() {
       </header>
 
       <aside className="sidebar" aria-label="Primary navigation">
-        {navItems.filter((item) => !item.relay || relayAvailable).map((item) => {
+        {navItems.filter((item) =>
+          (!item.relay || relayAvailable)
+          && (item.id !== "calibration" || document.settings.control.brightness_source === "sensor")
+        ).map((item) => {
           const Icon = item.icon;
           return (
             <button
