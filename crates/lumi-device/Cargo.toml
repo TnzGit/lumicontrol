@@ -1,0 +1,14 @@
+[package]
+name = "lumi-device"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Persistent Lumi USB discovery, framing, commands, events, and reconnect policy"
+
+[dependencies]
+lumi-protocol = { path = "../lumi-protocol" }
+serde.workspace = true
+serialport.workspace = true
+
+[dev-dependencies]
+lumi-device-simulator = { path = "../../tools/device-simulator" }

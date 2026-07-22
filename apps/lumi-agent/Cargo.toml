@@ -1,0 +1,37 @@
+[package]
+name = "lumi-agent"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Per-user LumiControl hardware and policy Agent"
+
+[build-dependencies]
+embed-resource = "3.0"
+
+[dependencies]
+lumi-core = { path = "../../crates/lumi-core" }
+lumi-device = { path = "../../crates/lumi-device" }
+lumi-environment = { path = "../../crates/lumi-environment" }
+lumi-ipc = { path = "../../crates/lumi-ipc" }
+lumi-monitor-windows = { path = "../../crates/lumi-monitor-windows" }
+lumi-protocol = { path = "../../crates/lumi-protocol" }
+lumi-store = { path = "../../crates/lumi-store" }
+serde.workspace = true
+serde_json.workspace = true
+tray-icon.workspace = true
+winit.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+] }
+zip.workspace = true
+
+[dev-dependencies]
+lumi-device-simulator = { path = "../../tools/device-simulator" }
+
+[[bin]]
+name = "lumi-agent"
+path = "src/main.rs"

@@ -1,0 +1,11 @@
+[package]
+name = "lumi-device-console"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Manufacturing and support console for Lumi Device Protocol V2"
+
+[dependencies]
+lumi-device = { path = "../../crates/lumi-device" }
+lumi-protocol = { path = "../../crates/lumi-protocol" }
+serde_json.workspace = true

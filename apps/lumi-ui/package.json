@@ -1,0 +1,30 @@
+{
+  "name": "lumi-ui",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "stage:agent": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../../tools/stage-agent-sidecar.ps1",
+    "pretauri:build": "npm run stage:agent",
+    "tauri:build": "tauri build --config src-tauri/tauri.bundle.conf.json"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.3"
+  }
+}

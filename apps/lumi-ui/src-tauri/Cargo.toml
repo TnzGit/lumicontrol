@@ -1,0 +1,27 @@
+[package]
+name = "lumi-ui"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "On-demand LumiControl desktop user interface"
+
+[lib]
+name = "lumi_ui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+lumi-ipc = { path = "../../../crates/lumi-ipc" }
+lumi-store = { path = "../../../crates/lumi-store" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+url.workspace = true
+
+[[bin]]
+name = "lumi-ui"
+path = "src/main.rs"

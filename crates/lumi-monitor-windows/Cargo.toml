@@ -1,0 +1,10 @@
+[package]
+name = "lumi-monitor-windows"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Stable Windows monitor identity, DDC/CI access, and nonblocking transitions"
+
+[dependencies]
+lumi-core = { path = "../lumi-core" }
+serde.workspace = true

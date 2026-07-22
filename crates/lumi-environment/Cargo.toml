@@ -1,0 +1,20 @@
+[package]
+name = "lumi-environment"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Offline solar context and low-overhead weather provider for LumiControl"
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+lumi-core = { path = "../lumi-core" }
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+] }

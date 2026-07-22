@@ -1,0 +1,9 @@
+[package]
+name = "lumi-core"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Deterministic brightness, sensor, transition, and rule engine for LumiControl"
+
+[dependencies]
+serde.workspace = true

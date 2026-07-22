@@ -1,0 +1,10 @@
+[package]
+name = "lumi-device-simulator"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Deterministic Lumi Protocol V2 device simulator"
+
+[dependencies]
+lumi-protocol = { path = "../../crates/lumi-protocol" }
+serde_json.workspace = true

@@ -1,0 +1,55 @@
+[package]
+name = "screen-brightness"
+version = "0.1.0"
+edition = "2021"
+description = "Windows weather-aware DDC/CI monitor brightness controller"
+license-file = "LICENSE"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/lumi-core",
+    "crates/lumi-device",
+    "crates/lumi-environment",
+    "crates/lumi-ipc",
+    "crates/lumi-monitor-windows",
+    "crates/lumi-protocol",
+    "crates/lumi-store",
+    "apps/lumi-agent",
+    "apps/lumi-ui/src-tauri",
+    "tools/device-console",
+    "tools/device-simulator",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license-file = "LICENSE"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serialport = "4"
+tray-icon = "0.21"
+winit = "0.30"
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10.4"
+url = "2"
+zip = { version = "8.6.0", default-features = false }
+
+[dependencies]
+eframe = "0.32"
+egui = "0.32"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+serialport.workspace = true
+tray-icon.workspace = true
+winit.workspace = true
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

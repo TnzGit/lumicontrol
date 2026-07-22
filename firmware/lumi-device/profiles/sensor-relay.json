@@ -1,0 +1,7 @@
+{
+  "profile": "sensor-relay",
+  "product_id": "lumi-sensor-relay",
+  "capabilities": ["ambient_lux", "relay"],
+  "relay_gpio": 10,
+  "relay_active_low": true
+}

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/lumi-ui/package-lock.json
+
+      - name: Install UI dependencies
+        working-directory: apps/lumi-ui
+        run: npm ci
+
+      - name: Build UI
+        working-directory: apps/lumi-ui
+        run: npm run build
+
+      - name: Install Python test dependency
+        run: python -m pip install pytest
+
+      - name: Test launchers
+        run: python -m pytest -q tests/test_launchers.py
