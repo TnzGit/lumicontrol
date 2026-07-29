@@ -5,7 +5,8 @@ pub use support::StartupRegistration;
 use lumi_core::{
     evaluate_rules, map_normalized_lux_to_brightness, recommend_environment_brightness,
     BrightnessSource, ConditionExpression, EnvironmentBrightnessInput, EnvironmentWeatherInput,
-    LightAction, LightCondition, LogLuxFilter, ManualOverrideGuard, RuleContext, TargetStabilizer,
+    LightAction, LightCondition, LogLuxFilter, ManualOverrideGuard, ManualOverrideObservation,
+    RuleContext, TargetStabilizer,
 };
 use lumi_device::{
     discover_device, DeviceEvent, DevicePortProvider, DiscoveryPolicy, ReconnectBackoff,
@@ -544,6 +545,8 @@ enum RuntimeMessage {
     Environment(EnvironmentWorkerEvent),
     Monitor(SchedulerEvent),
     System(SystemEvent),
+    #[cfg(test)]
+    ProbeMonitors,
 }
 
 struct EnvironmentWorkerEvent {
@@ -803,6 +806,7 @@ struct MonitorControlState {
     current: Option<i32>,
     target: Option<i32>,
     transition_active: bool,
+    operation_error_active: bool,
 }
 
 struct SolarCache {
@@ -933,6 +937,8 @@ impl AgentRuntime {
                 }
                 Ok(RuntimeMessage::Monitor(event)) => self.handle_monitor_event(event),
                 Ok(RuntimeMessage::System(event)) => self.handle_system_event(event),
+                #[cfg(test)]
+                Ok(RuntimeMessage::ProbeMonitors) => self.probe_monitors(),
                 Err(RecvTimeoutError::Timeout) => self.handle_deadlines(),
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -978,12 +984,16 @@ impl AgentRuntime {
         }
         if now.duration_since(self.last_probe) >= MONITOR_PROBE_INTERVAL {
             self.last_probe = now;
-            for descriptor in self.scheduler.descriptors() {
-                let _ = self.scheduler.read_now(&descriptor.id);
-            }
+            self.probe_monitors();
         }
         self.maybe_schedule_weather();
         self.update_environment_control();
+    }
+
+    fn probe_monitors(&self) {
+        for descriptor in self.scheduler.descriptors() {
+            let _ = self.scheduler.read_now(&descriptor.id);
+        }
     }
 
     fn handle_system_event(&mut self, event: SystemEvent) {
@@ -1003,6 +1013,10 @@ impl AgentRuntime {
                 self.logger.info("system_suspend", "System is suspending");
                 self.suspended = true;
                 self.last_sensor = None;
+                for state in self.monitor_state.values_mut() {
+                    state.transition_active = false;
+                    state.guard.mark_unreliable();
+                }
                 let _ = self.device_tx.send(DeviceCommand::Suspend);
                 self.snapshots.update(|snapshot| {
                     snapshot.sensor.valid = false;
@@ -1725,13 +1739,35 @@ impl AgentRuntime {
             .collect::<Vec<_>>();
         self.monitor_state.retain(|id, _| ids.contains(id));
         for descriptor in &descriptors {
+            let current = descriptor.current_percent();
+            let operation_error_active = descriptor.qualification_error.is_some();
             self.monitor_state
                 .entry(descriptor.id.clone())
+                .and_modify(|state| {
+                    state.current = current;
+                    state.target = self.last_target;
+                    state.transition_active = false;
+                    state.operation_error_active = operation_error_active;
+                    if operation_error_active {
+                        state.guard.mark_unreliable();
+                    } else {
+                        state.guard.mark_reliable();
+                    }
+                })
                 .or_insert_with(|| MonitorControlState {
-                    guard: ManualOverrideGuard::new(self.document.settings.control.manual_override),
-                    current: descriptor.current_percent(),
+                    guard: {
+                        let mut guard = ManualOverrideGuard::new(
+                            self.document.settings.control.manual_override,
+                        );
+                        if operation_error_active {
+                            guard.mark_unreliable();
+                        }
+                        guard
+                    },
+                    current,
                     target: self.last_target,
                     transition_active: false,
+                    operation_error_active,
                 });
         }
         self.snapshots.update(|snapshot| {
@@ -1766,65 +1802,136 @@ impl AgentRuntime {
                 monitor_id,
                 current_percent,
             } => {
+                let mut recovered = false;
                 if let Some(state) = self.monitor_state.get_mut(&monitor_id) {
+                    recovered = state.operation_error_active;
                     state.current = Some(current_percent);
+                    state.operation_error_active = false;
+                    state.guard.mark_reliable();
                 }
                 self.update_monitor_snapshot(&monitor_id, |monitor| {
                     monitor.current_percent = Some(current_percent);
                     monitor.last_error = None;
                 });
+                if recovered {
+                    self.logger
+                        .info("monitor_recovered", "A monitor connection recovered");
+                }
             }
             SchedulerEvent::BrightnessApplied {
                 monitor_id,
                 percent,
             } => {
+                let mut recovered = false;
                 if let Some(state) = self.monitor_state.get_mut(&monitor_id) {
+                    recovered = state.operation_error_active;
                     state.current = Some(percent);
+                    state.operation_error_active = false;
+                    state.guard.mark_reliable();
                 }
                 self.update_monitor_snapshot(&monitor_id, |monitor| {
                     monitor.current_percent = Some(percent);
                     monitor.last_error = None;
                 });
+                if recovered {
+                    self.logger
+                        .info("monitor_recovered", "A monitor connection recovered");
+                }
             }
             SchedulerEvent::BrightnessObserved {
                 monitor_id,
                 percent,
             } => {
                 let now_ms = self.now_ms();
+                let paused = self.document.settings.paused;
+                let mut observation = ManualOverrideObservation::Unchanged;
+                let mut remaining = None;
                 if let Some(state) = self.monitor_state.get_mut(&monitor_id) {
                     let expected = state.current.or(state.target).unwrap_or(percent);
-                    state
-                        .guard
-                        .observe(now_ms, expected, percent, state.transition_active);
-                    state.current = Some(percent);
-                    let remaining = state.guard.remaining_ms(now_ms);
-                    self.update_monitor_snapshot(&monitor_id, |monitor| {
-                        monitor.current_percent = Some(percent);
-                        monitor.manual_override_remaining_ms = remaining;
-                    });
+                    observation = if paused {
+                        state.guard.mark_reliable();
+                        ManualOverrideObservation::Unchanged
+                    } else {
+                        state
+                            .guard
+                            .observe(now_ms, expected, percent, state.transition_active)
+                    };
+                    if matches!(
+                        observation,
+                        ManualOverrideObservation::Unchanged
+                            | ManualOverrideObservation::Activated
+                            | ManualOverrideObservation::Recovered
+                    ) {
+                        state.current = Some(percent);
+                    }
+                    state.operation_error_active = false;
+                    remaining = state.guard.remaining_ms(now_ms);
+                }
+                self.update_monitor_snapshot(&monitor_id, |monitor| {
+                    monitor.current_percent = Some(percent);
+                    monitor.manual_override_remaining_ms = remaining;
+                    monitor.last_error = None;
+                });
+                match observation {
+                    ManualOverrideObservation::ConfirmationPending => {
+                        if let Err(error) = self.scheduler.read_now(&monitor_id) {
+                            self.handle_monitor_event(SchedulerEvent::MonitorError {
+                                monitor_id,
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                    ManualOverrideObservation::Activated => {
+                        self.logger.info(
+                            "manual_override_confirmed",
+                            "An external monitor brightness change was confirmed",
+                        );
+                    }
+                    ManualOverrideObservation::Recovered => {
+                        self.logger
+                            .info("monitor_recovered", "A monitor connection recovered");
+                        self.apply_last_target();
+                    }
+                    ManualOverrideObservation::Unchanged
+                    | ManualOverrideObservation::ConfirmationRejected => {}
                 }
             }
             SchedulerEvent::TransitionComplete {
                 monitor_id,
                 percent,
             } => {
+                let mut recovered = false;
                 if let Some(state) = self.monitor_state.get_mut(&monitor_id) {
+                    recovered = state.operation_error_active;
                     state.current = Some(percent);
                     state.transition_active = false;
+                    state.operation_error_active = false;
+                    state.guard.mark_reliable();
                 }
                 self.update_monitor_snapshot(&monitor_id, |monitor| {
                     monitor.current_percent = Some(percent);
                     monitor.transition_active = false;
+                    monitor.last_error = None;
                 });
+                if recovered {
+                    self.logger
+                        .info("monitor_recovered", "A monitor connection recovered");
+                }
             }
             SchedulerEvent::MonitorError {
                 monitor_id,
                 message,
             } => {
-                self.logger
-                    .warn("monitor_error", "A monitor operation failed");
+                let mut should_log = true;
                 if let Some(state) = self.monitor_state.get_mut(&monitor_id) {
+                    should_log = !state.operation_error_active;
                     state.transition_active = false;
+                    state.operation_error_active = true;
+                    state.guard.mark_unreliable();
+                }
+                if should_log {
+                    self.logger
+                        .warn("monitor_error", "A monitor operation failed");
                 }
                 self.update_monitor_snapshot(&monitor_id, |monitor| {
                     monitor.ddc_error_count = monitor.ddc_error_count.saturating_add(1);
@@ -1874,7 +1981,9 @@ impl AgentRuntime {
                     .monitors
                     .get(*id)
                     .is_none_or(|profile| profile.enabled);
-                enabled && !state.guard.is_suppressed(now_ms)
+                enabled
+                    && !state.guard.is_suppressed(now_ms)
+                    && !state.guard.is_confirmation_pending(now_ms)
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
@@ -1887,6 +1996,7 @@ impl AgentRuntime {
                     if let Some(state) = self.monitor_state.get_mut(&id) {
                         state.target = Some(target);
                         state.transition_active = true;
+                        state.guard.cancel_confirmation();
                     }
                     self.update_monitor_snapshot(&id, |monitor| {
                         monitor.target_percent = Some(target);
@@ -1894,9 +2004,12 @@ impl AgentRuntime {
                         monitor.manual_override_remaining_ms = None;
                     });
                 }
-                Err(error) => self.update_monitor_snapshot(&id, |monitor| {
-                    monitor.last_error = Some(error.to_string());
-                }),
+                Err(error) => {
+                    self.handle_monitor_event(SchedulerEvent::MonitorError {
+                        monitor_id: id,
+                        message: error.to_string(),
+                    });
+                }
             }
         }
         self.update_override_snapshots(now_ms);
@@ -2625,6 +2738,17 @@ mod tests {
         assert!(predicate(), "condition did not become true before timeout");
     }
 
+    fn wait_for_settled_monitor(handle: &AgentHandle) -> i32 {
+        wait_until(Duration::from_secs(4), || {
+            let snapshot = handle.snapshot();
+            snapshot.target_percent.is_some()
+                && snapshot.monitors.iter().any(|monitor| {
+                    monitor.current_percent == snapshot.target_percent && !monitor.transition_active
+                })
+        });
+        handle.snapshot().target_percent.unwrap()
+    }
+
     #[test]
     fn sensor_events_continue_without_any_ui_client() {
         let (process, monitor) = start_test_agent(SimulatedProfile::Sensor);
@@ -2634,6 +2758,61 @@ mod tests {
             snapshot.sensor.valid && snapshot.target_percent.is_some()
         });
         wait_until(Duration::from_secs(2), || *monitor.lock().unwrap() != 25);
+        process.shutdown();
+    }
+
+    #[test]
+    fn manual_monitor_change_requires_a_confirming_read() {
+        let (process, monitor) = start_test_agent(SimulatedProfile::Sensor);
+        let handle = process.handle();
+        let target = wait_for_settled_monitor(&handle);
+        let manual = if target >= 50 { 10 } else { 90 };
+        *monitor.lock().unwrap() = manual;
+
+        handle
+            .tx
+            .send(RuntimeMessage::Monitor(
+                SchedulerEvent::BrightnessObserved {
+                    monitor_id: "monitor-test".to_string(),
+                    percent: manual,
+                },
+            ))
+            .unwrap();
+
+        wait_until(Duration::from_secs(1), || {
+            handle.snapshot().monitors.iter().any(|monitor| {
+                monitor.current_percent == Some(manual)
+                    && monitor.manual_override_remaining_ms.is_some()
+            })
+        });
+        process.shutdown();
+    }
+
+    #[test]
+    fn first_monitor_read_after_an_error_recovers_without_override() {
+        let (process, monitor) = start_test_agent(SimulatedProfile::Sensor);
+        let handle = process.handle();
+        let target = wait_for_settled_monitor(&handle);
+        let stale_wake_value = if target >= 50 { 10 } else { 90 };
+        *monitor.lock().unwrap() = stale_wake_value;
+
+        handle
+            .tx
+            .send(RuntimeMessage::Monitor(SchedulerEvent::MonitorError {
+                monitor_id: "monitor-test".to_string(),
+                message: "simulated display sleep".to_string(),
+            }))
+            .unwrap();
+        handle.tx.send(RuntimeMessage::ProbeMonitors).unwrap();
+
+        wait_until(Duration::from_secs(3), || {
+            *monitor.lock().unwrap() == target
+                && handle.snapshot().monitors.iter().any(|monitor| {
+                    monitor.current_percent == Some(target)
+                        && monitor.manual_override_remaining_ms.is_none()
+                        && monitor.last_error.is_none()
+                })
+        });
         process.shutdown();
     }
 

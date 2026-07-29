@@ -665,13 +665,35 @@ impl Default for ManualOverrideConfig {
 pub struct ManualOverrideGuard {
     config: ManualOverrideConfig,
     suppressed_until_ms: Option<u64>,
+    confirmation: Option<ManualOverrideCandidate>,
+    observation_unreliable: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ManualOverrideCandidate {
+    percent: i32,
+    observed_at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManualOverrideObservation {
+    Unchanged,
+    ConfirmationPending,
+    ConfirmationRejected,
+    Activated,
+    Recovered,
 }
 
 impl ManualOverrideGuard {
+    const CONFIRMATION_WINDOW_MS: u64 = 5_000;
+    const CONFIRMATION_TOLERANCE: i32 = 1;
+
     pub fn new(config: ManualOverrideConfig) -> Self {
         Self {
             config,
             suppressed_until_ms: None,
+            confirmation: None,
+            observation_unreliable: false,
         }
     }
 
@@ -681,16 +703,41 @@ impl ManualOverrideGuard {
         expected_brightness: i32,
         observed_brightness: i32,
         transition_active: bool,
-    ) -> bool {
-        if !transition_active
-            && (expected_brightness - observed_brightness).abs()
-                >= self.config.detection_threshold.max(1)
-        {
-            self.suppressed_until_ms = Some(now_ms.saturating_add(self.config.grace_period_ms));
-            true
-        } else {
-            false
+    ) -> ManualOverrideObservation {
+        if transition_active {
+            self.confirmation = None;
+            return ManualOverrideObservation::Unchanged;
         }
+        if self.observation_unreliable {
+            self.observation_unreliable = false;
+            self.confirmation = None;
+            return ManualOverrideObservation::Recovered;
+        }
+
+        if let Some(candidate) = self.confirmation.take() {
+            let confirmation_is_fresh =
+                now_ms.saturating_sub(candidate.observed_at_ms) <= Self::CONFIRMATION_WINDOW_MS;
+            if confirmation_is_fresh {
+                if (candidate.percent - observed_brightness).abs() <= Self::CONFIRMATION_TOLERANCE {
+                    self.suppressed_until_ms =
+                        Some(now_ms.saturating_add(self.config.grace_period_ms));
+                    return ManualOverrideObservation::Activated;
+                }
+                return ManualOverrideObservation::ConfirmationRejected;
+            }
+        }
+
+        if (expected_brightness - observed_brightness).abs()
+            < self.config.detection_threshold.max(1)
+        {
+            return ManualOverrideObservation::Unchanged;
+        }
+
+        self.confirmation = Some(ManualOverrideCandidate {
+            percent: observed_brightness,
+            observed_at_ms: now_ms,
+        });
+        ManualOverrideObservation::ConfirmationPending
     }
 
     pub fn is_suppressed(&self, now_ms: u64) -> bool {
@@ -704,8 +751,30 @@ impl ManualOverrideGuard {
             .filter(|remaining| *remaining > 0)
     }
 
+    pub fn is_confirmation_pending(&self, now_ms: u64) -> bool {
+        self.confirmation.is_some_and(|candidate| {
+            now_ms.saturating_sub(candidate.observed_at_ms) <= Self::CONFIRMATION_WINDOW_MS
+        })
+    }
+
+    pub fn mark_unreliable(&mut self) {
+        self.confirmation = None;
+        self.observation_unreliable = true;
+    }
+
+    pub fn mark_reliable(&mut self) {
+        self.confirmation = None;
+        self.observation_unreliable = false;
+    }
+
+    pub fn cancel_confirmation(&mut self) {
+        self.confirmation = None;
+    }
+
     pub fn clear(&mut self) {
         self.suppressed_until_ms = None;
+        self.confirmation = None;
+        self.observation_unreliable = false;
     }
 }
 
@@ -950,10 +1019,60 @@ mod tests {
             detection_threshold: 4,
             grace_period_ms: 1_000,
         });
-        assert!(guard.observe(5_000, 70, 60, false));
+        assert_eq!(
+            guard.observe(5_000, 70, 60, false),
+            ManualOverrideObservation::ConfirmationPending
+        );
+        assert!(guard.is_confirmation_pending(5_001));
+        assert!(!guard.is_suppressed(5_001));
+        assert_eq!(
+            guard.observe(5_100, 70, 60, false),
+            ManualOverrideObservation::Activated
+        );
         assert!(guard.is_suppressed(5_999));
-        assert_eq!(guard.remaining_ms(1_000), Some(5_000));
-        assert!(!guard.is_suppressed(6_000));
-        assert_eq!(guard.remaining_ms(6_000), None);
+        assert_eq!(guard.remaining_ms(5_100), Some(1_000));
+        assert!(!guard.is_suppressed(6_100));
+        assert_eq!(guard.remaining_ms(6_100), None);
+    }
+
+    #[test]
+    fn manual_override_rejects_an_unstable_confirmation() {
+        let mut guard = ManualOverrideGuard::new(ManualOverrideConfig::default());
+        assert_eq!(
+            guard.observe(1_000, 70, 20, false),
+            ManualOverrideObservation::ConfirmationPending
+        );
+        assert_eq!(
+            guard.observe(1_100, 70, 35, false),
+            ManualOverrideObservation::ConfirmationRejected
+        );
+        assert!(!guard.is_suppressed(1_100));
+        assert!(!guard.is_confirmation_pending(1_100));
+    }
+
+    #[test]
+    fn first_observation_after_a_monitor_error_is_recovery_not_override() {
+        let mut guard = ManualOverrideGuard::new(ManualOverrideConfig::default());
+        guard.mark_unreliable();
+        assert_eq!(
+            guard.observe(1_000, 88, 10, false),
+            ManualOverrideObservation::Recovered
+        );
+        assert!(!guard.is_suppressed(1_000));
+        assert!(!guard.is_confirmation_pending(1_000));
+    }
+
+    #[test]
+    fn automatic_transitions_cancel_pending_override_confirmation() {
+        let mut guard = ManualOverrideGuard::new(ManualOverrideConfig::default());
+        assert_eq!(
+            guard.observe(1_000, 70, 20, false),
+            ManualOverrideObservation::ConfirmationPending
+        );
+        assert_eq!(
+            guard.observe(1_100, 65, 60, true),
+            ManualOverrideObservation::Unchanged
+        );
+        assert!(!guard.is_confirmation_pending(1_100));
     }
 }
