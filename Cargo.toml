@@ -36,7 +36,7 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10.4"
 url = "2"
-zip = { version = "8.6.0", default-features = false }
+zip = { version = "9.0.5", default-features = false }
 
 [dependencies]
 eframe = "0.32"
